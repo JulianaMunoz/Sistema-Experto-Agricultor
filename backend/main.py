@@ -5,7 +5,7 @@ from pydantic import EmailStr
 from typing import List
 from collections import defaultdict
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func, and_, or_
 from passlib.context import CryptContext
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import psycopg2
@@ -102,10 +102,10 @@ def create_factor(factor: FactorCreate, db: Session = Depends(get_db)):
     return new_factor
 
 #consulta de todos los factores
-@app.get("/factores/", response_model=List[FactorResponse])
-def get_factores(db: Session = Depends(get_db)):
-    factores = db.query(Factor).all()
-    return factores
+@app.get("/factores/")
+def list_factores(db: Session = Depends(get_db)):
+    factores = db.query(Factor).order_by(Factor.id.asc()).all()
+    return [{"id": f.id, "nombre": (f.nombre or "").lower()} for f in factores]
 
 #consulta de un solo factor
 @app.get("/factores/{factor_id}", response_model=FactorResponse)
@@ -152,10 +152,13 @@ def create_regla(fh: FactorHechoCreate, db: Session = Depends(get_db)):
     return new_regla
 
 #consulta de todas las reglas
-@app.get("/reglas/", response_model=List[FactorHechoResponse])
-def get_reglas(db: Session = Depends(get_db)):
-    reglas = db.query(FactorHecho).all()
-    return reglas
+@app.get("/reglas/")
+def list_reglas(db: Session = Depends(get_db)):
+    reglas = db.query(FactorHecho).order_by(FactorHecho.id.asc()).all()
+    return [
+        {"id": r.id, "factor_id": r.factor_id, "hecho_id": r.hecho_id, "operador": r.operador, "valor": r.valor}
+        for r in reglas
+    ]
 
 #consulta una sola regla
 @app.get("/reglas/{regla_id}", response_model=FactorHechoResponse)
@@ -171,41 +174,30 @@ def get_regla(regla_id: int, db: Session = Depends(get_db)):
 # ============================================================
 #            NUEVA RUTA: FACTORES + VALORES (hechos)
 # ============================================================
-@app.get("/factors-values", response_model=None)
+@app.get("/factors-values")
 def get_factors_values(db: Session = Depends(get_db)):
     """
-    Devuelve cada Factor con sus valores (columna 'valor') 
-    provenientes de FactorHecho.
+    Devuelve [{nombre: "clima", valores: ["húmedo", "seco", ...]}, ...]
+    Extrae valores únicos de FactorHecho para cada Factor.
     """
-    rows = (
-        db.query(
-            Factor.id.label("factor_id"),
-            Factor.nombre.label("factor_nombre"),
-            FactorHecho.id.label("factor_hecho_id"),
-            FactorHecho.valor.label("valor"),
-        )
-        .join(FactorHecho, FactorHecho.factor_id == Factor.id)
-        .order_by(Factor.nombre.asc(), FactorHecho.id.asc())
-        .all()
-    )
-
-    agrupado = defaultdict(list)
-    for r in rows:
-        agrupado[r.factor_id].append({
-            "factor_hecho_id": r.factor_hecho_id,
-            "valor": r.valor
+    factors = db.query(Factor).order_by(Factor.nombre.asc()).all()
+    
+    result = []
+    for factor in factors:
+        # Obtener valores únicos para este factor
+        valores = db.query(FactorHecho.valor).filter(
+            FactorHecho.factor_id == factor.id
+        ).distinct().all()
+        
+        # Normalizar: valores es lista de tuplas, extraer strings
+        valores_list = [v[0] for v in valores if v[0]]  # Filtrar None/vacíos
+        
+        result.append({
+            "nombre": factor.nombre.lower(),
+            "valores": valores_list
         })
-
-    data = []
-    for fid, valores in agrupado.items():
-        nombre = next((r.factor_nombre for r in rows if r.factor_id == fid), f"Factor {fid}")
-        data.append({
-            "factor_id": fid,
-            "factor_nombre": nombre,
-            "valores": valores
-        })
-
-    return data
+    
+    return result
 
 
 # ============================================================
@@ -315,3 +307,174 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
     db.delete(user)
     db.commit()
     return None
+
+@app.get("/api/preguntas")
+def get_preguntas(db: Session = Depends(get_db)):
+    """
+    Devuelve preguntas ordenadas empezando por 'altitud' y luego por
+    aparición en las reglas (FactorHecho). Para 'altitud' incluye operador+valor.
+    Estructura devuelta: [{id, text, options: [{v,t}, ...]}, ...]
+    """
+    # traer todos los factores, pero forzar altitud al inicio si existe
+    factors = db.query(Factor).order_by(Factor.id.asc()).all()
+    # buscar factor 'altitud' (case-insensitive)
+    alt_factor = next((f for f in factors if (f.nombre or "").lower() == "altitud"), None)
+    ordered = []
+    if alt_factor:
+        ordered.append(alt_factor)
+    # ahora ordenar los restantes según la primera aparición en FactorHecho (min id)
+    first = (
+        db.query(FactorHecho.factor_id, func.min(FactorHecho.id).label("minid"))
+        .group_by(FactorHecho.factor_id)
+        .order_by("minid")
+        .all()
+    )
+    order_ids = [r.factor_id for r in first if r.factor_id != (alt_factor.id if alt_factor else None)]
+    fmap = {f.id: f for f in factors}
+    ordered += [fmap[i] for i in order_ids if i in fmap and fmap[i] not in ordered]
+    # añadir los que no aparecen en reglas
+    ordered += [f for f in factors if f not in ordered]
+
+    preguntas = []
+    for f in ordered:
+        fhs = (
+            db.query(FactorHecho)
+            .filter(FactorHecho.factor_id == f.id)
+            .order_by(FactorHecho.id.asc())
+            .all()
+        )
+        seen = set()
+        options = []
+        fname = (f.nombre or "").lower()
+
+        for fh in fhs:
+            v_raw = (fh.valor or "").strip()
+            if not v_raw:
+                continue
+
+            # altitud: construir valor con operador para que frontend lo use (ej. "<=1000")
+            if fname == "altitud":
+                op = (fh.operador or "").strip()
+                value = f"{op}{v_raw}"
+                if value in seen:
+                    continue
+                seen.add(value)
+
+                # etiqueta legible
+                if op in ("<=", "=<"):
+                    label = f"≤ {v_raw} msnm"
+                elif op in (">=", "=>"):
+                    label = f"≥ {v_raw} msnm"
+                elif op == "=":
+                    label = f"{v_raw} msnm"
+                else:
+                    label = f"{op} {v_raw}".strip()
+                options.append({"v": value, "t": label})
+            else:
+                value = v_raw.lower()
+                if value in seen:
+                    continue
+                seen.add(value)
+                options.append({"v": value, "t": v_raw})
+
+        preguntas.append({"id": fname, "text": f.nombre or fname, "options": options})
+
+    return preguntas
+
+@app.post("/api/recomendar")
+def recomendar(respuestas: dict, db: Session = Depends(get_db)):
+    """
+    Evalúa dinámicamente las reglas: para cada Hecho, verifica que todas las condiciones
+    (FactorHecho) asociadas se cumplan con las respuestas del usuario.
+    Devuelve la lista de hecho.descripcion que cumplen todas sus condiciones.
+    """
+    # normalizar respuestas: claves en minúscula y strip
+    resp = {k.lower(): (v or "").strip() for k, v in (respuestas or {}).items()}
+
+    recomendaciones = []
+    hechos = db.query(Hecho).all()
+    for hecho in hechos:
+        condiciones = db.query(FactorHecho).filter(FactorHecho.hecho_id == hecho.id).all()
+        if not condiciones:
+            continue
+
+        todas = True
+        for c in condiciones:
+            # obtener nombre del factor asociado
+            factor = db.query(Factor).filter(Factor.id == c.factor_id).first()
+            fname = (factor.nombre or "").lower() if factor else None
+            valor_usuario = resp.get(fname, "")
+            if not evaluar_condicion(c.operador, c.valor, valor_usuario):
+                todas = False
+                break
+        if todas:
+            recomendaciones.append(hecho.descripcion)
+
+    recomendaciones = list(dict.fromkeys(recomendaciones))
+
+    return {
+        "count": len(recomendaciones),
+        "recomendaciones": recomendaciones if recomendaciones else ["No hay recomendaciones para tu combinación de respuestas."]
+    }
+
+def evaluar_condicion(operador, valor_regla, valor_respuesta):
+    """
+    Evalúa si la respuesta del usuario coincide con la condición de la regla.
+    Soporta '=' y comparadores numéricos '<=' '>='.
+    """
+    if not valor_respuesta:
+        return False
+
+    val_resp = str(valor_respuesta).strip().lower()
+    val_regla = str(valor_regla).strip().lower()
+    op = (operador or "").strip()
+
+    # igualdad textual
+    if op in ("=", "=="):
+        return val_resp == val_regla
+
+    # comparadores numéricos (usualmente para altitud)
+    try:
+        # intentar extraer número de la regla
+        num_regla = int(''.join(ch for ch in val_regla if ch.isdigit()))
+    except Exception:
+        num_regla = None
+
+    # normalizar respuesta numérica si viene como "<=1000" o "1000-2000" o "1000"
+    try:
+        if val_resp.startswith("<=") or val_resp.startswith("=<"):
+            num_resp = int(''.join(ch for ch in val_resp if ch.isdigit()))
+            if op in ("<=", "=<"):
+                return num_resp <= (num_regla if num_regla is not None else num_resp)
+            if op in (">=", "=>"):
+                return num_resp >= (num_regla if num_regla is not None else num_resp)
+        if val_resp.startswith(">=") or val_resp.startswith("=>"):
+            num_resp = int(''.join(ch for ch in val_resp if ch.isdigit()))
+            if op in (">=", "=>"):
+                return num_resp >= (num_regla if num_regla is not None else num_resp)
+            if op in ("<=", "=<"):
+                return num_resp <= (num_regla if num_regla is not None else num_resp)
+
+        # si respuesta es rango "1000-2000", tratar como rango
+        if "-" in val_resp:
+            parts = [int(''.join(ch for ch in p if ch.isdigit())) for p in val_resp.split("-") if any(ch.isdigit() for ch in p)]
+            if len(parts) == 2 and num_regla is not None:
+                low, high = parts
+                if op in ("<=", "=<"):
+                    # regla p.e. <=1000: verdadero si upper bound <= regla
+                    return high <= num_regla
+                if op in (">=", "=>"):
+                    return low >= num_regla
+
+        # si la regla es numérica y la respuesta es número simple
+        if val_resp.isdigit() and num_regla is not None:
+            num_resp = int(val_resp)
+            if op in ("<=", "=<"):
+                return num_resp <= num_regla
+            if op in (">=", "=>"):
+                return num_resp >= num_regla
+    except Exception:
+        pass
+
+    # fallback: comparación textual exacta
+    return val_resp == val_regla
