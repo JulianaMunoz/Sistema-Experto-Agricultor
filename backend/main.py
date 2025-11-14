@@ -315,6 +315,7 @@ def get_preguntas(db: Session = Depends(get_db)):
     aparición en las reglas (FactorHecho). Para 'altitud' incluye operador+valor.
     Estructura devuelta: [{id, text, options: [{v,t}, ...]}, ...]
     """
+    #vfvgvgvgvgvgvS
     # traer todos los factores, pero forzar altitud al inicio si existe
     factors = db.query(Factor).order_by(Factor.id.asc()).all()
     # buscar factor 'altitud' (case-insensitive)
