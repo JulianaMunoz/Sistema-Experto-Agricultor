@@ -32,30 +32,6 @@
 
   <script>
 window.addEventListener('DOMContentLoaded', async () => {
-  // Consultar preguntas desde la API
-  let todosPreguntas = {};
-  try {
-    const resp = await fetch('/api/preguntas');
-    if (!resp.ok) throw new Error('No se pudieron cargar las preguntas');
-    const data = await resp.json(); // [{id,text,options:[{v,t}]}]
-    data.forEach(q => { todosPreguntas[q.id] = q; });
-  } catch (e) {
-    console.error('API preguntas error:', e);
-    // fallback mínimo para que siga funcionando
-    todosPreguntas = {
-      altitud: { id:'altitud', text:'¿Cuál es la altitud de la parcela?', options:[
-        {v:'<=1000',t:'≤ 1.000 msnm'},{v:'1000-2000',t:'1.000 - 2.000 msnm'},{v:'2000-3000',t:'2.000 - 3.000 msnm'},{v:'>=3000',t:'≥ 3.000 msnm'}
-      ]},
-      clima: { id:'clima', text:'¿Cómo describes el clima?', options:[] },
-      suelo: { id:'suelo', text:'¿Cuál es el tipo de suelo?', options:[] },
-      riego: { id:'riego', text:'¿Cuentas con riego?', options:[{v:'si',t:'Sí'},{v:'no',t:'No'}] },
-      riesgo_heladas: { id:'riesgo_heladas', text:'¿Existe riesgo de heladas?', options:[{v:'si',t:'Sí'},{v:'no',t:'No'}] },
-      manejo_heladas: { id:'manejo_heladas', text:'¿Cuentas con manejo de heladas?', options:[{v:'si',t:'Sí'},{v:'no',t:'No'}] },
-      zona: { id:'zona', text:'¿Es zona de conservación ambiental?', options:[{v:'si',t:'Sí'},{v:'no',t:'No'}] }
-    };
-  }
-
-  // Reusar la lógica de wizard existente pero usando todosPreguntas dinámico
   const preguntaEl = document.getElementById("pregunta");
   const opcionesEl = document.getElementById("opciones");
   const btnNext = document.getElementById("btnNext");
@@ -63,171 +39,134 @@ window.addEventListener('DOMContentLoaded', async () => {
   const btnConsultar = document.getElementById("btnConsultar");
   const resultadoEl = document.getElementById("resultado");
 
-  let preguntaActual = null;
   let respuestas = {};
+  let historial = [];
+  let preguntaActual = null;
 
-  function construirOpcionesClima(altitud) {
-    // Mapeo basado en reglas del enunciado
-    const opcionesClima = {
-      '<=1000': ['húmedo', 'seco'],
-      '1000-2000': ['húmedo', 'seco'],
-      '2000-3000': ['estable'],
-      '>=3000': ['muy_frío_húmedo']
-    };
-    const vals = opcionesClima[altitud] || [];
-    return (todosPreguntas.clima?.options || []).filter(o => vals.includes(o.v)).map(o => ({v:o.v,t:o.t}));
-  }
+  function renderPregunta(pregunta) {
+    preguntaActual = pregunta;
+    resultadoEl.classList.add("d-none");
 
-  function construirOpcionesSuelo(clima) {
-    const opcionesSuelo = {
-      'húmedo': ['arcilloso', 'franco', 'arenoso'],
-      'seco': [],
-      'estable': ['franco', 'arcilloso']
-    };
-    const vals = opcionesSuelo[clima] || [];
-    return (todosPreguntas.suelo?.options || []).filter(o => vals.includes(o.v)).map(o => ({v:o.v,t:o.t}));
-  }
-
-  function renderPregunta(preguntaId) {
-    let p = todosPreguntas[preguntaId];
-    if (!p) {
-      preguntaEl.innerHTML = "<strong>Error</strong>";
-      opcionesEl.innerHTML = "<p>Pregunta no encontrada.</p>";
+    if (!pregunta) {
+      preguntaEl.innerHTML = "<strong>Listo</strong>";
+      opcionesEl.innerHTML = "<p>Ya puedes consultar las recomendaciones segun tus respuestas.</p>";
+      btnNext.classList.add("d-none");
+      btnConsultar.classList.remove("d-none");
+      btnBack.disabled = historial.length === 0;
       return;
     }
 
-    if (preguntaId === 'clima') {
-      const alt = respuestas['altitud'];
-      p = { ...p, options: construirOpcionesClima(alt) };
-    } else if (preguntaId === 'suelo') {
-      const clim = respuestas['clima'];
-      p = { ...p, options: construirOpcionesSuelo(clim) };
-    }
-
-    preguntaActual = p;
-    preguntaEl.textContent = p.text;
+    preguntaEl.textContent = pregunta.text || pregunta.id;
     opcionesEl.innerHTML = "";
-
-    if (!p.options || p.options.length === 0) {
+    if (!pregunta.options || !pregunta.options.length) {
       opcionesEl.innerHTML = "<div class='text-muted'>No hay opciones disponibles para esta pregunta.</div>";
       btnNext.disabled = true;
       return;
     }
 
-    p.options.forEach(o => {
-      const id = `opt-${p.id}-${o.v}`;
+    btnNext.disabled = false;
+    pregunta.options.forEach((opcion) => {
+      const inputId = ("opt-" + pregunta.id + "-" + opcion.v).replace(/[^a-zA-Z0-9_-]/g, "");
       const wrapper = document.createElement("div");
       wrapper.className = "form-check";
-      wrapper.innerHTML = `
-        <input class="form-check-input" type="radio" name="${p.id}" id="${id}" value="${o.v}">
-        <label class="form-check-label" for="${id}">${o.t}</label>
-      `;
+      wrapper.innerHTML =
+        '<input class="form-check-input" type="radio" name="' + pregunta.id + '" id="' + inputId + '" value="' + opcion.v + '">' +
+        '<label class="form-check-label" for="' + inputId + '">' + opcion.t + "</label>";
       opcionesEl.appendChild(wrapper);
     });
 
-    const sel = respuestas[p.id];
-    if (sel) {
-      const input = opcionesEl.querySelector(`input[value="${sel}"]`);
+    const seleccion = respuestas[pregunta.id];
+    if (seleccion) {
+      const input = opcionesEl.querySelector('input[value="' + seleccion + '"]');
       if (input) input.checked = true;
     }
 
     btnNext.classList.remove("d-none");
     btnConsultar.classList.add("d-none");
-    btnBack.disabled = Object.keys(respuestas).length === 0;
-    resultadoEl.classList.add("d-none");
+    btnBack.disabled = historial.length === 0 && !respuestas[pregunta.id];
   }
 
-  function determinarSiguiente() {
-    const alt = respuestas['altitud'];
-    const clim = respuestas['clima'];
-    const suelo = respuestas['suelo'];
-    const riego = respuestas['riego'];
-    const riesgo = respuestas['riesgo_heladas'];
-    const manejo = respuestas['manejo_heladas'];
-
-    if (!alt) return 'altitud';
-    if (!clim) return 'clima';
-
-    // reglas indicadas por el usuario (piso térmico / condiciones)
-    if (alt === '<=1000' || alt === '1000-2000') {
-      if (clim === 'húmedo') {
-        if (!suelo) return 'suelo';
-      } else if (clim === 'seco') {
-        if (!riego) return 'riego';
-      }
-    } else if (alt === '2000-3000') {
-      if (clim === 'estable') {
-        if (!suelo) return 'suelo';
-      }
-    } else if (alt === '>=3000') {
-      // en páramo no requiere más preguntas salvo zona
-      if (!respuestas['zona']) return 'zona';
-    }
-
-    return null;
-  }
-
-  document.getElementById("btnNext").addEventListener("click", () => {
-    if (!preguntaActual) return;
-    const sel = opcionesEl.querySelector(`input[name="${preguntaActual.id}"]:checked`);
-    if (!sel) { alert("Seleccione una opción para continuar."); return; }
-
-    respuestas[preguntaActual.id] = sel.value;
-    const siguiente = determinarSiguiente();
-
-    if (siguiente) {
-      renderPregunta(siguiente);
-    } else {
-      preguntaEl.innerHTML = "<strong>✅ Listo</strong>";
-      opcionesEl.innerHTML = "<p>Ahora puedes consultar las recomendaciones de cultivos según tus respuestas.</p>";
+  async function cargarSiguientePregunta() {
+    try {
+      const resp = await fetch("/api/pregunta-siguiente", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(respuestas)
+      });
+      if (!resp.ok) throw new Error("No se pudieron obtener preguntas");
+      const data = await resp.json();
+      renderPregunta(data.pregunta);
+    } catch (err) {
+      console.error("API pregunta-siguiente error:", err);
+      preguntaEl.innerHTML = "<strong>No se pudieron cargar las preguntas.</strong>";
+      opcionesEl.innerHTML = "<p class='text-muted'>Revisa la conexión o los datos de la base.</p>";
       btnNext.classList.add("d-none");
-      btnConsultar.classList.remove("d-none");
+      btnConsultar.classList.add("d-none");
+      btnBack.disabled = historial.length === 0;
     }
+  }
+
+  await cargarSiguientePregunta();
+
+  btnNext.addEventListener("click", async () => {
+    if (!preguntaActual) {
+      await cargarSiguientePregunta();
+      return;
+    }
+    const seleccion = opcionesEl.querySelector('input[name="' + preguntaActual.id + '"]:checked');
+    if (!seleccion) {
+      alert("Selecciona una opcion para continuar.");
+      return;
+    }
+    respuestas[preguntaActual.id] = seleccion.value;
+    historial = historial.filter((k) => k !== preguntaActual.id);
+    historial.push(preguntaActual.id);
+    await cargarSiguientePregunta();
   });
 
-  document.getElementById("btnBack").addEventListener("click", () => {
-    const keys = Object.keys(respuestas);
-    if (keys.length > 0) {
-      const lastKey = keys[keys.length - 1];
-      delete respuestas[lastKey];
-      const siguiente = determinarSiguiente();
-      renderPregunta(siguiente || 'altitud');
-    }
+  btnBack.addEventListener("click", async () => {
+    if (!historial.length) return;
+    const last = historial.pop();
+    delete respuestas[last];
+    await cargarSiguientePregunta();
   });
 
-  document.getElementById("btnConsultar").addEventListener("click", async () => {
+  btnConsultar.addEventListener("click", async () => {
     btnConsultar.disabled = true;
-    btnConsultar.textContent = "Consultando…";
+    btnConsultar.textContent = "Consultando...";
     try {
       const resp = await fetch("/api/recomendar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(respuestas)
       });
+      if (!resp.ok) throw new Error("No se pudieron obtener recomendaciones");
       const data = await resp.json();
       resultadoEl.classList.remove("d-none");
-
-      if (data && data.count > 0 && Array.isArray(data.recomendaciones)) {
-        resultadoEl.innerHTML = `<h4>✅ Recomendaciones (${data.count}):</h4><ul class="list-group">`;
-        data.recomendaciones.forEach(rec => {
-          resultadoEl.innerHTML += `<li class="list-group-item"><strong>${rec}</strong></li>`;
+      if (Array.isArray(data.recomendaciones) && data.recomendaciones.length > 0) {
+        let total = data.count || data.recomendaciones.length;
+        let html = '<h4>Recomendaciones (' + total + ')</h4><div class="list-group">';
+        data.recomendaciones.forEach((rec) => {
+          html += '<div class="list-group-item d-flex justify-content-between align-items-center">' +
+            '<strong>' + rec.descripcion + '</strong>' +
+            '<span class="badge bg-success">' + rec.porcentaje + '%</span>' +
+            '</div>';
         });
-        resultadoEl.innerHTML += `</ul>`;
+        html += "</div>";
+        resultadoEl.innerHTML = html;
       } else {
-        resultadoEl.innerHTML = `<div class="alert alert-warning">❌ No se encontraron recomendaciones para tus respuestas.</div>`;
+        const mensaje = data.message || "No se encontraron recomendaciones para tus respuestas.";
+        resultadoEl.innerHTML = '<div class="alert alert-warning">' + mensaje + "</div>";
       }
-    } catch (e) {
-      console.error('Error:', e);
+    } catch (err) {
+      console.error("Error recomendaciones:", err);
       resultadoEl.classList.remove("d-none");
-      resultadoEl.innerHTML = `<div class="alert alert-danger">Error: ${e.message}</div>`;
+      resultadoEl.innerHTML = '<div class="alert alert-danger">' + err.message + "</div>";
     } finally {
       btnConsultar.disabled = false;
       btnConsultar.textContent = "Consultar";
     }
   });
-
-  // iniciar por altitud
-  renderPregunta('altitud');
 });
 </script>
 </body>

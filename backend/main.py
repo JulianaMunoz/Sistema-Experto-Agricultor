@@ -1,8 +1,8 @@
-from fastapi import Depends, FastAPI, HTTPException, status, Request, Form
+from fastapi import Depends, FastAPI, HTTPException, status, Request, Form, Body
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse
 from pydantic import EmailStr
-from typing import List
+from typing import List, Optional
 from collections import defaultdict
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func, and_, or_
@@ -167,6 +167,26 @@ def get_regla(regla_id: int, db: Session = Depends(get_db)):
     if not regla:
         raise HTTPException(status_code=404, detail="Regla no encontrada")
     return regla
+@app.put("/reglas/{regla_id}", response_model=FactorHechoResponse)
+def update_regla(regla_id: int, fh: FactorHechoCreate, db: Session = Depends(get_db)):
+    regla = db.query(FactorHecho).filter(FactorHecho.id == regla_id).first()
+    if not regla:
+        raise HTTPException(status_code=404, detail="Regla no encontrada")
+    regla.factor_id = fh.factor_id
+    regla.hecho_id = fh.hecho_id
+    regla.operador = fh.operador
+    regla.valor = fh.valor
+    db.commit()
+    db.refresh(regla)
+    return regla
+@app.delete("/reglas/{regla_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_regla(regla_id: int, db: Session = Depends(get_db)): 
+    regla = db.query(FactorHecho).filter(FactorHecho.id == regla_id).first()
+    if not regla:
+        raise HTTPException(status_code=404, detail="Regla no encontrada")
+    db.delete(regla)
+    db.commit()
+    return None
 
 # -------------------- GESTIÓN DE USUARIOS --------------------
 # Configuración de contraseñas (bcrypt con fallback)
@@ -309,173 +329,325 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
     return None
 
 @app.get("/api/preguntas")
-def get_preguntas(db: Session = Depends(get_db)):
+def get_preguntas(altitud: Optional[str] = None, db: Session = Depends(get_db)):
     """
-    Devuelve preguntas ordenadas empezando por 'altitud' y luego por
-    aparición en las reglas (FactorHecho). Para 'altitud' incluye operador+valor.
-    Estructura devuelta: [{id, text, options: [{v,t}, ...]}, ...]
+    Provee el flujo de preguntas ordenado: primero altitud, luego factores compatibles.
+    - Sin altitud => solo pregunta inicial.
+    - Con altitud => factores de los hechos que cumplen esa condicion.
     """
-    #vfvgvgvgvgvgvS
-    # traer todos los factores, pero forzar altitud al inicio si existe
     factors = db.query(Factor).order_by(Factor.id.asc()).all()
-    # buscar factor 'altitud' (case-insensitive)
     alt_factor = next((f for f in factors if (f.nombre or "").lower() == "altitud"), None)
-    ordered = []
-    if alt_factor:
-        ordered.append(alt_factor)
-    # ahora ordenar los restantes según la primera aparición en FactorHecho (min id)
-    first = (
-        db.query(FactorHecho.factor_id, func.min(FactorHecho.id).label("minid"))
-        .group_by(FactorHecho.factor_id)
-        .order_by("minid")
-        .all()
-    )
-    order_ids = [r.factor_id for r in first if r.factor_id != (alt_factor.id if alt_factor else None)]
-    fmap = {f.id: f for f in factors}
-    ordered += [fmap[i] for i in order_ids if i in fmap and fmap[i] not in ordered]
-    # añadir los que no aparecen en reglas
-    ordered += [f for f in factors if f not in ordered]
 
-    preguntas = []
-    for f in ordered:
-        fhs = (
+    def build_altitud_question() -> List[dict]:
+        if not alt_factor:
+            return []
+        registros = (
             db.query(FactorHecho)
-            .filter(FactorHecho.factor_id == f.id)
+            .filter(FactorHecho.factor_id == alt_factor.id)
             .order_by(FactorHecho.id.asc())
             .all()
         )
         seen = set()
         options = []
-        fname = (f.nombre or "").lower()
-
-        for fh in fhs:
-            v_raw = (fh.valor or "").strip()
-            if not v_raw:
+        for row in registros:
+            raw_value = (row.valor or "").strip()
+            if not raw_value:
                 continue
+            op = (row.operador or "").strip() or "="
+            normalized = raw_value if any(raw_value.startswith(prefix) for prefix in (">=", "=>", "<=", "=<")) else raw_value
+            if op in (">=", "=>") and not normalized.startswith((">=", "=>")):
+                normalized = f">={raw_value}"
+            if op in ("<=", "=<") and not normalized.startswith(("<=", "=<")):
+                normalized = f"<={raw_value}"
+            if normalized in seen:
+                continue
+            seen.add(normalized)
 
-            # altitud: construir valor con operador para que frontend lo use (ej. "<=1000")
-            if fname == "altitud":
-                op = (fh.operador or "").strip()
-                value = f"{op}{v_raw}"
-                if value in seen:
-                    continue
-                seen.add(value)
-
-                # etiqueta legible
-                if op in ("<=", "=<"):
-                    label = f"≤ {v_raw} msnm"
-                elif op in (">=", "=>"):
-                    label = f"≥ {v_raw} msnm"
-                elif op == "=":
-                    label = f"{v_raw} msnm"
-                else:
-                    label = f"{op} {v_raw}".strip()
-                options.append({"v": value, "t": label})
+            if "-" in raw_value:
+                label = f"{raw_value} msnm"
+            elif normalized.startswith(">=") or op in (">=", "=>"):
+                label = f">= {raw_value} msnm"
+            elif normalized.startswith("<=") or op in ("<=", "=<"):
+                label = f"<= {raw_value} msnm"
             else:
-                value = v_raw.lower()
-                if value in seen:
-                    continue
-                seen.add(value)
-                options.append({"v": value, "t": v_raw})
+                label = f"{raw_value} msnm"
+            options.append({"v": normalized, "t": label})
 
-        preguntas.append({"id": fname, "text": f.nombre or fname, "options": options})
+        if not options:
+            return []
+        return [{"id": "altitud", "text": alt_factor.nombre or "Altitud", "options": options}]
+
+    preguntas = build_altitud_question()
+    if not altitud or not alt_factor:
+        return preguntas
+
+    hechos_validos = set()
+    alt_rules = db.query(FactorHecho).filter(FactorHecho.factor_id == alt_factor.id).all()
+    for rule in alt_rules:
+        if evaluar_condicion(rule.operador, rule.valor, altitud):
+            hechos_validos.add(rule.hecho_id)
+
+    if not hechos_validos:
+        return preguntas
+
+    factor_query = db.query(FactorHecho.factor_id).filter(FactorHecho.hecho_id.in_(hechos_validos))
+    if alt_factor:
+        factor_query = factor_query.filter(FactorHecho.factor_id != alt_factor.id)
+    factor_ids = sorted({fid for (fid,) in factor_query.distinct().all()})
+
+    factor_lookup = {f.id: f for f in factors}
+    for fid in factor_ids:
+        factor = factor_lookup.get(fid)
+        if not factor:
+            continue
+        registros = (
+            db.query(FactorHecho)
+            .filter(FactorHecho.factor_id == factor.id)
+            .filter(FactorHecho.hecho_id.in_(hechos_validos))
+            .order_by(FactorHecho.id.asc())
+            .all()
+        )
+        if not registros:
+            continue
+        opciones = []
+        vistos = set()
+        nombre_factor = (factor.nombre or "").lower()
+        for row in registros:
+            valor = (row.valor or "").strip()
+            if not valor:
+                continue
+            normalized = valor.lower()
+            if normalized in vistos:
+                continue
+            vistos.add(normalized)
+            opciones.append({"v": normalized, "t": valor})
+        if opciones:
+            preguntas.append({"id": nombre_factor, "text": factor.nombre or nombre_factor, "options": opciones})
 
     return preguntas
 
-@app.post("/api/recomendar")
-def recomendar(respuestas: dict, db: Session = Depends(get_db)):
-    """
-    Evalúa dinámicamente las reglas: para cada Hecho, verifica que todas las condiciones
-    (FactorHecho) asociadas se cumplan con las respuestas del usuario.
-    Devuelve la lista de hecho.descripcion que cumplen todas sus condiciones.
-    """
-    # normalizar respuestas: claves en minúscula y strip
-    resp = {k.lower(): (v or "").strip() for k, v in (respuestas or {}).items()}
 
-    recomendaciones = []
+def recomendar(respuestas: dict, db: Session = Depends(get_db)):
+    """Calcula porcentaje de viabilidad por hecho."""
+    resp = {k.lower(): (v or "").strip() for k, v in (respuestas or {}).items()}
+    resultados = []
     hechos = db.query(Hecho).all()
     for hecho in hechos:
         condiciones = db.query(FactorHecho).filter(FactorHecho.hecho_id == hecho.id).all()
         if not condiciones:
             continue
-
-        todas = True
-        for c in condiciones:
-            # obtener nombre del factor asociado
-            factor = db.query(Factor).filter(Factor.id == c.factor_id).first()
+        cumplidas = 0
+        for condicion in condiciones:
+            factor = db.query(Factor).filter(Factor.id == condicion.factor_id).first()
             fname = (factor.nombre or "").lower() if factor else None
+            if not fname:
+                continue
             valor_usuario = resp.get(fname, "")
-            if not evaluar_condicion(c.operador, c.valor, valor_usuario):
-                todas = False
-                break
-        if todas:
-            recomendaciones.append(hecho.descripcion)
+            if evaluar_condicion(condicion.operador, condicion.valor, valor_usuario):
+                cumplidas += 1
+        porcentaje = int((cumplidas * 100) / len(condiciones)) if condiciones else 0
+        if porcentaje > 0:
+            resultados.append({"descripcion": hecho.descripcion, "porcentaje": porcentaje})
 
-    recomendaciones = list(dict.fromkeys(recomendaciones))
+    resultados.sort(key=lambda x: x["porcentaje"], reverse=True)
+    if resultados:
+        return {"count": len(resultados), "recomendaciones": resultados}
+    return {"count": 0, "recomendaciones": [], "message": "No hay recomendaciones para tu combinacion de respuestas."}
 
+
+@app.post("/api/recomendar")
+def recomendar_endpoint(respuestas: dict = Body(...), db: Session = Depends(get_db)):
+    return recomendar(respuestas, db)
+
+
+@app.post("/api/pregunta-siguiente")
+def pregunta_siguiente(respuestas: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Devuelve solo la siguiente pregunta necesaria, filtrando factores
+    por los hechos que aún son compatibles con las respuestas actuales.
+    """
+    resp = {k.lower(): (v or "").strip() for k, v in (respuestas or {}).items()}
+    factors = db.query(Factor).order_by(Factor.id.asc()).all()
+    factor_lookup = {f.id: f for f in factors}
+    alt_factor = next((f for f in factors if (f.nombre or "").lower() == "altitud"), None)
+
+    def build_altitud_question():
+        if not alt_factor:
+            return None
+        registros = (
+            db.query(FactorHecho)
+            .filter(FactorHecho.factor_id == alt_factor.id)
+            .order_by(FactorHecho.id.asc())
+            .all()
+        )
+        seen = set()
+        options = []
+        for row in registros:
+            raw_value = (row.valor or "").strip()
+            if not raw_value:
+                continue
+            op = (row.operador or "").strip() or "="
+            normalized = raw_value if any(raw_value.startswith(prefix) for prefix in (">=", "=>", "<=", "=<")) else raw_value
+            if op in (">=", "=>") and not normalized.startswith((">=", "=>")):
+                normalized = f">={raw_value}"
+            if op in ("<=", "=<") and not normalized.startswith(("<=", "=<")):
+                normalized = f"<={raw_value}"
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+
+            if "-" in raw_value:
+                label = f"{raw_value} msnm"
+            elif normalized.startswith(">=") or op in (">=", "=>"):
+                label = f">= {raw_value} msnm"
+            elif normalized.startswith("<=") or op in ("<=", "=<"):
+                label = f"<= {raw_value} msnm"
+            else:
+                label = f"{raw_value} msnm"
+            options.append({"v": normalized, "t": label})
+
+        if not options:
+            return None
+        return {"id": "altitud", "text": alt_factor.nombre or "Altitud", "options": options}
+
+    # si falta altitud, preguntar primero
+    if not resp.get("altitud"):
+        alt_q = build_altitud_question()
+        return {"pregunta": alt_q, "pendientes": 1 if alt_q else 0}
+
+    # filtrar hechos compatibles con las respuestas actuales
+    hechos = db.query(Hecho).all()
+    hechos_candidatos = []
+    for hecho in hechos:
+        condiciones = db.query(FactorHecho).filter(FactorHecho.hecho_id == hecho.id).all()
+        cumple = True
+        for cond in condiciones:
+            factor = factor_lookup.get(cond.factor_id)
+            fname = (factor.nombre or "").lower() if factor else None
+            if fname and fname in resp:
+                if not evaluar_condicion(cond.operador, cond.valor, resp[fname]):
+                    cumple = False
+                    break
+        if cumple:
+            hechos_candidatos.append(hecho.id)
+
+    if not hechos_candidatos:
+        return {"pregunta": None, "pendientes": 0, "message": "No quedan hechos compatibles con tus respuestas."}
+
+    # factores pendientes en hechos compatibles (excluyendo los ya respondidos)
+    factor_ids = (
+        db.query(FactorHecho.factor_id)
+        .filter(FactorHecho.hecho_id.in_(hechos_candidatos))
+        .distinct()
+        .all()
+    )
+    factor_ids = [fid for (fid,) in factor_ids]
+    pendientes = [
+        fid
+        for fid in factor_ids
+        if factor_lookup.get(fid) and (factor_lookup[fid].nombre or "").lower() not in resp
+    ]
+    if alt_factor:
+        pendientes = [fid for fid in pendientes if fid != alt_factor.id]
+
+    if not pendientes:
+        return {"pregunta": None, "pendientes": 0}
+
+    siguiente_id = sorted(pendientes)[0]
+    factor = factor_lookup.get(siguiente_id)
+    registros = (
+        db.query(FactorHecho.valor)
+        .filter(FactorHecho.factor_id == siguiente_id)
+        .filter(FactorHecho.hecho_id.in_(hechos_candidatos))
+        .distinct()
+        .all()
+    )
+    options = []
+    seen = set()
+    for (valor,) in registros:
+        val = (valor or "").strip()
+        if not val:
+            continue
+        norm = val.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        options.append({"v": norm, "t": val})
+
+    if not options:
+        return {"pregunta": None, "pendientes": 0}
+
+    nombre_factor = (factor.nombre or "").lower()
     return {
-        "count": len(recomendaciones),
-        "recomendaciones": recomendaciones if recomendaciones else ["No hay recomendaciones para tu combinación de respuestas."]
+        "pregunta": {"id": nombre_factor, "text": factor.nombre or nombre_factor, "options": options},
+        "pendientes": len(pendientes),
     }
-
 def evaluar_condicion(operador, valor_regla, valor_respuesta):
     """
-    Evalúa si la respuesta del usuario coincide con la condición de la regla.
-    Soporta '=' y comparadores numéricos '<=' '>='.
+    Evalua si la respuesta del usuario coincide con la condicion de la regla.
+    Soporta '=' y comparadores numericos '<=' '>=' y rangos tipo '1000-2000' o '>=3000'.
     """
     if not valor_respuesta:
         return False
 
     val_resp = str(valor_respuesta).strip().lower()
     val_regla = str(valor_regla).strip().lower()
-    op = (operador or "").strip()
+    op = (operador or "").strip() or "="
 
-    # igualdad textual
-    if op in ("=", "=="):
+    # igualdad textual (incluye rangos exactos)
+    if op in ("=", "==") and not val_regla.startswith((">=", "=>", "<=", "=<")) and "-" not in val_regla:
         return val_resp == val_regla
 
-    # comparadores numéricos (usualmente para altitud)
     try:
-        # intentar extraer número de la regla
-        num_regla = int(''.join(ch for ch in val_regla if ch.isdigit()))
+        # regla como rango "a-b"
+        if "-" in val_regla:
+            parts_regla = [int("".join(ch for ch in p if ch.isdigit())) for p in val_regla.split("-") if any(ch.isdigit() for ch in p)]
+            if len(parts_regla) == 2:
+                low_r, high_r = parts_regla
+                if "-" in val_resp:
+                    parts_resp = [int("".join(ch for ch in p if ch.isdigit())) for p in val_resp.split("-") if any(ch.isdigit() for ch in p)]
+                    if len(parts_resp) == 2:
+                        low_u, high_u = parts_resp
+                        return low_u >= low_r and high_u <= high_r
+                if val_resp.isdigit():
+                    num_resp = int(val_resp)
+                    return low_r <= num_resp <= high_r
+                if val_resp.startswith(">=") or val_resp.startswith("=>"):
+                    num_resp = int("".join(ch for ch in val_resp if ch.isdigit()))
+                    return num_resp >= low_r
+                if val_resp.startswith("<=") or val_resp.startswith("=<"):
+                    num_resp = int("".join(ch for ch in val_resp if ch.isdigit()))
+                    return num_resp <= high_r
+
+        # regla >=X (por valor o por operador)
+        if val_regla.startswith(">=") or val_regla.startswith("=>") or op in (">=", "=>"):
+            num_regla = int("".join(ch for ch in val_regla if ch.isdigit())) if any(ch.isdigit() for ch in val_regla) else None
+            if num_regla is not None:
+                if val_resp.isdigit():
+                    return int(val_resp) >= num_regla
+                if val_resp.startswith(">=") or val_resp.startswith("=>"):
+                    return int("".join(ch for ch in val_resp if ch.isdigit())) >= num_regla
+                if "-" in val_resp:
+                    parts_resp = [int("".join(ch for ch in p if ch.isdigit())) for p in val_resp.split("-") if any(ch.isdigit() for ch in p)]
+                    if len(parts_resp) == 2:
+                        low_u, _ = parts_resp
+                        return low_u >= num_regla
+
+        # regla <=X
+        if val_regla.startswith("<=") or val_regla.startswith("=<") or op in ("<=", "=<"):
+            num_regla = int("".join(ch for ch in val_regla if ch.isdigit())) if any(ch.isdigit() for ch in val_regla) else None
+            if num_regla is not None:
+                if val_resp.isdigit():
+                    return int(val_resp) <= num_regla
+                if val_resp.startswith("<=") or val_resp.startswith("=<"):
+                    return int("".join(ch for ch in val_resp if ch.isdigit())) <= num_regla
+                if "-" in val_resp:
+                    parts_resp = [int("".join(ch for ch in p if ch.isdigit())) for p in val_resp.split("-") if any(ch.isdigit() for ch in p)]
+                    if len(parts_resp) == 2:
+                        _, high_u = parts_resp
+                        return high_u <= num_regla
+
+        # ultima opcion: comparar texto
+        return val_resp == val_regla
     except Exception:
-        num_regla = None
-
-    # normalizar respuesta numérica si viene como "<=1000" o "1000-2000" o "1000"
-    try:
-        if val_resp.startswith("<=") or val_resp.startswith("=<"):
-            num_resp = int(''.join(ch for ch in val_resp if ch.isdigit()))
-            if op in ("<=", "=<"):
-                return num_resp <= (num_regla if num_regla is not None else num_resp)
-            if op in (">=", "=>"):
-                return num_resp >= (num_regla if num_regla is not None else num_resp)
-        if val_resp.startswith(">=") or val_resp.startswith("=>"):
-            num_resp = int(''.join(ch for ch in val_resp if ch.isdigit()))
-            if op in (">=", "=>"):
-                return num_resp >= (num_regla if num_regla is not None else num_resp)
-            if op in ("<=", "=<"):
-                return num_resp <= (num_regla if num_regla is not None else num_resp)
-
-        # si respuesta es rango "1000-2000", tratar como rango
-        if "-" in val_resp:
-            parts = [int(''.join(ch for ch in p if ch.isdigit())) for p in val_resp.split("-") if any(ch.isdigit() for ch in p)]
-            if len(parts) == 2 and num_regla is not None:
-                low, high = parts
-                if op in ("<=", "=<"):
-                    # regla p.e. <=1000: verdadero si upper bound <= regla
-                    return high <= num_regla
-                if op in (">=", "=>"):
-                    return low >= num_regla
-
-        # si la regla es numérica y la respuesta es número simple
-        if val_resp.isdigit() and num_regla is not None:
-            num_resp = int(val_resp)
-            if op in ("<=", "=<"):
-                return num_resp <= num_regla
-            if op in (">=", "=>"):
-                return num_resp >= num_regla
-    except Exception:
-        pass
-
-    # fallback: comparación textual exacta
-    return val_resp == val_regla
+        return False
