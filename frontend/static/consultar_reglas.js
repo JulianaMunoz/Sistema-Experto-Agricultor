@@ -88,16 +88,45 @@ async function cargarReglas() {
 }
 
 async function eliminarRegla(id) {
-    if (!confirm('¿Eliminar esta regla?')) return;
-    try {
-        const resp = await fetch(`/reglas/${id}`, { method: 'DELETE' });
-        if (!resp.ok) throw new Error('No se pudo eliminar');
+    const regla = reglas.find(r => r.id === id);
+    if (!regla) return;
+
+    const result = await Swal.fire({
+        title: `Eliminar regla #${id}`,
+        html: `<p>¿Seguro que quieres eliminar la regla relacionada con <strong>${regla.factor_nombre ?? 'este factor'}</strong>?</p>`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'Eliminar',
+        cancelButtonText: 'Cancelar',
+        focusConfirm: false,
+        reverseButtons: true,
+        preConfirm: async () => {
+            // Este retorno permite que Swal muestre el loader mientras ocurre el fetch
+            try {
+                const resp = await fetch(`/reglas/${id}`, { method: 'DELETE' });
+                if (!resp.ok) {
+                    const text = await resp.text().catch(() => 'Error desconocido');
+                    throw new Error(text || 'No se pudo eliminar la regla');
+                }
+                return true;
+            } catch (err) {
+                // Si ocurre un error, Swal mostrará el mensaje de validación y no cerrará el modal
+                Swal.showValidationMessage(`Error: ${err.message}`);
+                return false;
+            }
+        },
+        allowOutsideClick: () => !Swal.isLoading()
+    });
+
+    if (result.isConfirmed && result.value) {
+        // Actualiza estado local y UI
         reglas = reglas.filter(r => r.id !== id);
+        // Si usas cargarReglas() en otros lados, podrías llamarla en lugar de aplicarFiltro()
         aplicarFiltro();
-    } catch (e) {
-        alert('Error al eliminar la regla');
+        Swal.fire('Eliminado', 'La regla fue eliminada correctamente.', 'success');
     }
 }
+
 
 cargarReglas();
 
