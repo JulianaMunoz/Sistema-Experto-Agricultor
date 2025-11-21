@@ -75,7 +75,7 @@
         if (resp.ok) {
     const data = isJson ? await resp.json() : {};
     showAlert(`✅ Bienvenido, <b>${data.name}</b>`, 'success');
-    setTimeout(() => window.location.href = "/home", 1000);
+    setTimeout(() => window.location.href = "./templates/home", 1000);
     } else {
           const err = isJson ? await resp.json() : { detail: 'Error desconocido' };
           showAlert(err.detail || 'Credenciales inválidas', 'danger');
