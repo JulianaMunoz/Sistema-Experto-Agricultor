@@ -1,5 +1,6 @@
 from fastapi import Depends, FastAPI, HTTPException, status, Request, Form, Body
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles  # ← AGREGAR ESTE IMPORT
 from fastapi.responses import RedirectResponse
 from pydantic import EmailStr
 from typing import List, Optional
@@ -10,6 +11,9 @@ from passlib.context import CryptContext
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import psycopg2
 from psycopg2 import OperationalError
+
+import os
+from pathlib import Path
 
 # ---- Configuración base ----
 from core.config import settings
@@ -56,9 +60,16 @@ def start_application():
     create_tables()
     return app
 
-app = start_application()
-templates = Jinja2Templates(directory="../templates")
+# Configuración de directorios
+BASE_DIR = Path(__file__).resolve().parent.parent  
+FRONTEND_DIR = BASE_DIR / "frontend"
+STATIC_DIR = FRONTEND_DIR / "static"  # ← AGREGAR ESTA LÍNEA
 
+app = start_application()
+templates = Jinja2Templates(directory=str(FRONTEND_DIR))
+
+# Montar archivos estáticos
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")  # ← AGREGAR ESTA LÍNEA
 
 # ============================================================
 #                     VISTAS HTML
@@ -71,23 +82,24 @@ def index(request: Request):
 
 @app.get("/register", response_model=None)
 def register_page(request: Request):
-    return templates.TemplateResponse("register.html", {"request": request, "title": "Crear cuenta"})
+    return templates.TemplateResponse("usuarios/register.html", {"request": request, "title": "Crear cuenta"})
 
 @app.get("/home", response_model=None)
 def home_page(request: Request):
-    return templates.TemplateResponse("home.html", {"request": request, "title": "Inicio"})
+    return templates.TemplateResponse("usuarios/home_users.html", {"request": request, "title": "Inicio"})
 
 @app.get("/vista/recomendaciones", response_model=None)
 def vista_recomendaciones(request: Request):
-    return templates.TemplateResponse("recomendaciones.html", {"request": request, "title": "Recomendaciones"})
+    return templates.TemplateResponse("usuarios/recomendaciones.html", {"request": request, "title": "Recomendaciones"})
 
 @app.get("/vista/reglas", response_model=None)
-def vista_recomendaciones(request: Request):
-    return templates.TemplateResponse("reglas.html", {"request": request, "title": "Reglas"})
+def vista_reglas(request: Request):
+    return templates.TemplateResponse("administradores/consultar_reglas.html", {"request": request, "title": "Reglas"})
 
 @app.get("/admin", response_model=None)
 def admin_page(request: Request):
-    return templates.TemplateResponse("home_admins.html", {"request": request, "title": "Admin"})
+    return templates.TemplateResponse("administradores/home_admins.html", {"request": request, "title": "Admin"})
+
 
 # ============================================================
 #                     ENDPOINTS DE NEGOCIO
