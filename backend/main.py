@@ -104,10 +104,6 @@ def admin_page(request: Request):
 def admin_consul_reglas_page(request: Request):
     return templates.TemplateResponse("administradores/consultar_reglas.html", {"request": request, "title": "Consultar Reglas"})
 
-@app.get("/admin/crearReglas", response_model=None)
-def admin_crear_reglas_page(request: Request):
-    return templates.TemplateResponse("administradores/crear_reglas.html", {"request": request, "title": "Crear Reglas"})
-
 # ============================================================
 #                     ENDPOINTS DE NEGOCIO
 # ============================================================
