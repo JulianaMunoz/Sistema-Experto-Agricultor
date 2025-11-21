@@ -328,15 +328,20 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
     db.commit()
     return None
 
+
 @app.get("/api/preguntas")
 def get_preguntas(altitud: Optional[str] = None, db: Session = Depends(get_db)):
     """
     Provee el flujo de preguntas ordenado: primero altitud, luego factores compatibles.
+    Solo pregunta altitud, clima y suelo en ese orden.
     - Sin altitud => solo pregunta inicial.
     - Con altitud => factores de los hechos que cumplen esa condicion.
     """
     factors = db.query(Factor).order_by(Factor.id.asc()).all()
-    alt_factor = next((f for f in factors if (f.nombre or "").lower() == "altitud"), None)
+    name_map = {(f.nombre or "").lower(): f for f in factors}
+    alt_factor = name_map.get("altitud")
+    clima_factor = name_map.get("clima")
+    suelo_factor = name_map.get("suelo")
 
     def build_altitud_question() -> List[dict]:
         if not alt_factor:
@@ -390,14 +395,10 @@ def get_preguntas(altitud: Optional[str] = None, db: Session = Depends(get_db)):
     if not hechos_validos:
         return preguntas
 
-    factor_query = db.query(FactorHecho.factor_id).filter(FactorHecho.hecho_id.in_(hechos_validos))
-    if alt_factor:
-        factor_query = factor_query.filter(FactorHecho.factor_id != alt_factor.id)
-    factor_ids = sorted({fid for (fid,) in factor_query.distinct().all()})
+    ordered_factors = [f for f in (clima_factor, suelo_factor) if f]
 
     factor_lookup = {f.id: f for f in factors}
-    for fid in factor_ids:
-        factor = factor_lookup.get(fid)
+    for factor in ordered_factors:
         if not factor:
             continue
         registros = (
@@ -407,11 +408,9 @@ def get_preguntas(altitud: Optional[str] = None, db: Session = Depends(get_db)):
             .order_by(FactorHecho.id.asc())
             .all()
         )
-        if not registros:
-            continue
+        nombre_factor = (factor.nombre or "").lower()
         opciones = []
         vistos = set()
-        nombre_factor = (factor.nombre or "").lower()
         for row in registros:
             valor = (row.valor or "").strip()
             if not valor:
@@ -421,8 +420,32 @@ def get_preguntas(altitud: Optional[str] = None, db: Session = Depends(get_db)):
                 continue
             vistos.add(normalized)
             opciones.append({"v": normalized, "t": valor})
+
+        # si hay pocas opciones por el filtro, agregar valores de todas las reglas de ese factor
+        if len(opciones) < 2:
+            extra_vals = (
+                db.query(FactorHecho.valor)
+                .filter(FactorHecho.factor_id == factor.id)
+                .distinct()
+                .all()
+            )
+            for (val_extra,) in extra_vals:
+                v = (val_extra or "").strip()
+                if not v:
+                    continue
+                norm = v.lower()
+                if norm in vistos:
+                    continue
+                vistos.add(norm)
+                opciones.append({"v": norm, "t": v})
+
         if opciones:
-            preguntas.append({"id": nombre_factor, "text": factor.nombre or nombre_factor, "options": opciones})
+            opciones = sorted(opciones, key=lambda o: (o.get("t") or o.get("v") or "").lower())
+            preguntas.append({
+                "id": nombre_factor,
+                "text": factor.nombre or nombre_factor,
+                "options": opciones,
+            })
 
     return preguntas
 
@@ -451,7 +474,8 @@ def recomendar(respuestas: dict, db: Session = Depends(get_db)):
 
     resultados.sort(key=lambda x: x["porcentaje"], reverse=True)
     if resultados:
-        return {"count": len(resultados), "recomendaciones": resultados}
+        top = resultados[:5]  # mostrar solo las 5 mejores
+        return {"count": len(top), "recomendaciones": top}
     return {"count": 0, "recomendaciones": [], "message": "No hay recomendaciones para tu combinacion de respuestas."}
 
 
@@ -464,12 +488,15 @@ def recomendar_endpoint(respuestas: dict = Body(...), db: Session = Depends(get_
 def pregunta_siguiente(respuestas: dict = Body(...), db: Session = Depends(get_db)):
     """
     Devuelve solo la siguiente pregunta necesaria, filtrando factores
-    por los hechos que aún son compatibles con las respuestas actuales.
+    por los hechos que aun son compatibles con las respuestas actuales.
+    Solo considera altitud, clima y suelo en ese orden.
     """
     resp = {k.lower(): (v or "").strip() for k, v in (respuestas or {}).items()}
     factors = db.query(Factor).order_by(Factor.id.asc()).all()
+    name_map = {(f.nombre or "").lower(): f for f in factors}
     factor_lookup = {f.id: f for f in factors}
-    alt_factor = next((f for f in factors if (f.nombre or "").lower() == "altitud"), None)
+    alt_factor = name_map.get("altitud")
+    allowed = [alt_factor, name_map.get("clima"), name_map.get("suelo")]
 
     def build_altitud_question():
         if not alt_factor:
@@ -510,12 +537,10 @@ def pregunta_siguiente(respuestas: dict = Body(...), db: Session = Depends(get_d
             return None
         return {"id": "altitud", "text": alt_factor.nombre or "Altitud", "options": options}
 
-    # si falta altitud, preguntar primero
     if not resp.get("altitud"):
         alt_q = build_altitud_question()
         return {"pregunta": alt_q, "pendientes": 1 if alt_q else 0}
 
-    # filtrar hechos compatibles con las respuestas actuales
     hechos = db.query(Hecho).all()
     hechos_candidatos = []
     for hecho in hechos:
@@ -534,30 +559,20 @@ def pregunta_siguiente(respuestas: dict = Body(...), db: Session = Depends(get_d
     if not hechos_candidatos:
         return {"pregunta": None, "pendientes": 0, "message": "No quedan hechos compatibles con tus respuestas."}
 
-    # factores pendientes en hechos compatibles (excluyendo los ya respondidos)
-    factor_ids = (
-        db.query(FactorHecho.factor_id)
-        .filter(FactorHecho.hecho_id.in_(hechos_candidatos))
-        .distinct()
-        .all()
-    )
-    factor_ids = [fid for (fid,) in factor_ids]
-    pendientes = [
-        fid
-        for fid in factor_ids
-        if factor_lookup.get(fid) and (factor_lookup[fid].nombre or "").lower() not in resp
-    ]
-    if alt_factor:
-        pendientes = [fid for fid in pendientes if fid != alt_factor.id]
-
+    pendientes = []
+    for f in allowed:
+        if not f or f == alt_factor:
+            continue
+        fname = (f.nombre or "").lower()
+        if fname not in resp:
+            pendientes.append(f)
     if not pendientes:
         return {"pregunta": None, "pendientes": 0}
 
-    siguiente_id = sorted(pendientes)[0]
-    factor = factor_lookup.get(siguiente_id)
+    factor = pendientes[0]
     registros = (
         db.query(FactorHecho.valor)
-        .filter(FactorHecho.factor_id == siguiente_id)
+        .filter(FactorHecho.factor_id == factor.id)
         .filter(FactorHecho.hecho_id.in_(hechos_candidatos))
         .distinct()
         .all()
@@ -574,6 +589,24 @@ def pregunta_siguiente(respuestas: dict = Body(...), db: Session = Depends(get_d
         seen.add(norm)
         options.append({"v": norm, "t": val})
 
+    if len(options) < 2:
+        extra_registros = (
+            db.query(FactorHecho.valor)
+            .filter(FactorHecho.factor_id == factor.id)
+            .distinct()
+            .all()
+        )
+        for (valor,) in extra_registros:
+            val = (valor or "").strip()
+            if not val:
+                continue
+            norm = val.lower()
+            if norm in seen:
+                continue
+            seen.add(norm)
+            options.append({"v": norm, "t": val})
+
+    options = sorted(options, key=lambda o: (o.get("t") or o.get("v") or "").lower())
     if not options:
         return {"pregunta": None, "pendientes": 0}
 
@@ -582,6 +615,7 @@ def pregunta_siguiente(respuestas: dict = Body(...), db: Session = Depends(get_d
         "pregunta": {"id": nombre_factor, "text": factor.nombre or nombre_factor, "options": options},
         "pendientes": len(pendientes),
     }
+
 def evaluar_condicion(operador, valor_regla, valor_respuesta):
     """
     Evalua si la respuesta del usuario coincide con la condicion de la regla.
