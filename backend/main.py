@@ -22,8 +22,10 @@ from db.models.factor import Factor
 from db.models.hecho import Hecho
 from db.models.factor_hecho import FactorHecho
 from db.models.usuario import Usuario
+from db.models.empleado import Empleado
 
 # ---- Schemas ----
+from db.schemas.empleado import EmpleadoRead, EmpleadoCreate
 from db.schemas.factor import FactorCreate, FactorResponse
 from db.schemas.hecho import HechoCreate, HechoResponse
 from db.schemas.factor_hecho import FactorHechoCreate, FactorHechoResponse
@@ -83,6 +85,9 @@ def vista_recomendaciones(request: Request):
 def vista_recomendaciones(request: Request):
     return templates.TemplateResponse("reglas.html", {"request": request, "title": "Reglas"})
 
+@app.get("/admin", response_model=None)
+def admin_page(request: Request):
+    return templates.TemplateResponse("home_admins.html", {"request": request, "title": "Admin"})
 
 # ============================================================
 #                     ENDPOINTS DE NEGOCIO
@@ -327,6 +332,33 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
     db.delete(user)
     db.commit()
     return None
+@app.post("/empleados", response_model=EmpleadoRead, status_code=status.HTTP_201_CREATED)
+def create_empleado(payload: EmpleadoCreate, db: Session = Depends(get_db)):
+    exists = db.query(Empleado).filter(Empleado.email == payload.email).first()
+    if exists:
+        raise HTTPException(status_code=400, detail="Empleado ya existe (email)")
+
+    emp = Empleado(
+        nombre=payload.nombre,
+        email=payload.email,
+        password=get_password_hash(payload.password),
+        es_admin=payload.es_admin if payload.es_admin is not None else True,
+    )
+    db.add(emp)
+    db.commit()
+    db.refresh(emp)
+    return emp
+
+@app.post("/empleado/login", response_model=EmpleadoRead)
+def login_empleado(
+    email: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    emp = db.query(Empleado).filter(Empleado.email == email).first()
+    if not emp or not verify_password(password, emp.password):
+        raise HTTPException(status_code=401, detail="Credenciales invalidas")
+    return emp
 
 
 @app.get("/api/preguntas")
