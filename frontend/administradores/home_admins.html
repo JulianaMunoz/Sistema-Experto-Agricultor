@@ -26,18 +26,16 @@
   <!-- NAVBAR -->
   <nav class="navbar navbar-expand-lg navbar-dark bg-danger">
     <div class="container">
-      <a class="navbar-brand fw-bold" href="#">🌾 Sistema Experto</a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+      <a class="navbar-brand fw-bold" href="/admin">🌾 Sistema Experto</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav">
         <span class="navbar-toggler-icon"></span>
       </button>
-
-      <div class="collapse navbar-collapse" id="navbarNav">
+      <div id="nav" class="collapse navbar-collapse">
         <ul class="navbar-nav ms-auto">
-          <li class="nav-item"><a class="nav-link active" href="./home_admins.html">Inicio</a></li>
-          <li class="nav-item"><a class="nav-link" href="#">Factores</a></li>
-          <li class="nav-item"><a class="nav-link" href="#">Hechos</a></li>
-          <li class="nav-item"><a class="nav-link" href="./consultar_reglas.html">Reglas</a></li>
-          <li class="nav-item"><a class="nav-link" href="../index.html">Cerrar sesión</a></li>
+          <li class="nav-item"><a class="nav-link" href="/admin">Inicio</a></li>
+          <li class="nav-item"><a class="nav-link active" href="/admin/consulReglas">Consultar</a></li>
+          <li class="nav-item"><a class="nav-link active" href="/admin/crearReglas">Crear</a></li>
+          <li class="nav-item"><a class="nav-link" href="/">Cerrar sesión</a></li>
         </ul>
       </div>
     </div>
@@ -60,7 +58,7 @@
           <div class="card-body">
             <h5 class="card-title fw-bold">📊 Reglas</h5>
             <p class="card-text">Consulta y agrega reglas lógicas del sistema experto.</p>
-            <a href="./consultar_reglas.html" class="btn btn-outline-danger w-100">Consultar Reglas</a>
+            <a href="/admin/consulReglas" class="btn btn-outline-danger w-100">Consultar Reglas</a>
           </div>
         </div>
       </div>
